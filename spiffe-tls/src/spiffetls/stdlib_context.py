@@ -53,8 +53,10 @@ import OpenSSL.SSL
 from cryptography import x509
 from OpenSSL import SSL, crypto
 
+from spiffe.bundle.x509_bundle.x509_bundle_set import X509BundleSet
 from spiffe.workloadapi.x509_source import X509Source
 from spiffetls.context import create_ssl_context
+from spiffetls.tlsconfig.verifier import build_verify_callback
 from spiffetls import util
 
 if TYPE_CHECKING:
@@ -508,6 +510,8 @@ class SpiffeSSLContext:
             protocol: The SSL/TLS protocol method to use.
         """
         self.protocol = protocol
+        self._x509_source = x509_source
+        self._use_system_trusted_cas = use_system_trusted_cas
         self._ctx = create_ssl_context(
             protocol,
             x509_source,
@@ -575,7 +579,16 @@ class SpiffeSSLContext:
         Args:
             value: The verification mode.
         """
-        self._ctx.set_verify(_stdlib_to_openssl_verify[value], _verify_callback)
+
+        def bundle_set_provider() -> X509BundleSet:
+            return X509BundleSet.of(list(self._x509_source.bundles))
+
+        verify_callback = build_verify_callback(
+            bundle_set_provider,
+            None,
+            allow_non_spiffe=self._use_system_trusted_cas,
+        )
+        self._ctx.set_verify(_stdlib_to_openssl_verify[value], verify_callback)
 
     def set_default_verify_paths(self) -> None:
         """Set default verification paths (no-op for SPIFFE contexts)."""
@@ -718,25 +731,3 @@ class SpiffeSSLContext:
         """
         self._maximum_version = maximum_version
         self._set_ctx_options()
-
-
-def _verify_callback(
-    cnx: OpenSSL.SSL.Connection,
-    x509: X509,
-    err_no: int,
-    err_depth: int,
-    return_code: int,
-) -> bool:
-    """Verification callback for OpenSSL.
-
-    Args:
-        cnx: The SSL connection.
-        x509: The certificate being verified.
-        err_no: The error number.
-        err_depth: The depth in the certificate chain.
-        return_code: The return code from OpenSSL.
-
-    Returns:
-        True if the certificate is valid, False otherwise.
-    """
-    return err_no == 0

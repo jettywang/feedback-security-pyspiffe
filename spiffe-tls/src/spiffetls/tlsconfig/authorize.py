@@ -18,14 +18,17 @@ import logging
 from typing import Callable, Set
 
 from OpenSSL import crypto
-from cryptography import x509
-from cryptography.x509.oid import ExtensionOID
 
-from spiffe.spiffe_id.spiffe_id import SpiffeId, SpiffeIdError, TrustDomain
-from spiffe.spiffe_id.spiffe_id import SCHEME_PREFIX
+from spiffe.spiffe_id.spiffe_id import SpiffeId, TrustDomain
 from spiffe.utils.errors import X509CertificateError
+from spiffetls.tlsconfig.verifier import spiffe_id_from_cert
 
 _logger: logging.Logger = logging.getLogger(__name__)
+
+
+def _spiffe_id_from_cert(cert: crypto.X509) -> SpiffeId:
+    """Returns the SPIFFE ID from a pyOpenSSL certificate."""
+    return spiffe_id_from_cert(cert)
 
 
 def authorize_any() -> Callable[[crypto.X509], bool]:
@@ -91,45 +94,3 @@ def authorize_member_of(
         return False
 
     return _authorize
-
-
-def _spiffe_id_from_cert(cert: crypto.X509) -> SpiffeId:
-    """Returns the SPIFFE ID from a pyOpenSSL certificate"""
-    cryptography_cert = cert.to_cryptography()
-
-    try:
-        ext = cryptography_cert.extensions.get_extension_for_oid(
-            ExtensionOID.SUBJECT_ALTERNATIVE_NAME
-        )
-    except x509.ExtensionNotFound as e:
-        raise X509CertificateError(
-            'Certificate does not contain a Subject Alternative Name extension'
-        ) from e
-
-    san_value = ext.value
-    if not isinstance(san_value, x509.SubjectAlternativeName):
-        raise X509CertificateError(
-            'Certificate does not contain a valid Subject Alternative Name extension'
-        )
-
-    uri_sans = san_value.get_values_for_type(x509.UniformResourceIdentifier)
-    if len(uri_sans) == 0:
-        raise X509CertificateError(
-            'Certificate does not contain a URI SAN (expected exactly one SPIFFE ID)'
-        )
-
-    if len(uri_sans) != 1:
-        raise X509CertificateError(
-            'Certificate contains multiple URI SAN entries (expected exactly one SPIFFE ID)'
-        )
-
-    uri = uri_sans[0]
-    if not uri.startswith(SCHEME_PREFIX):
-        raise X509CertificateError('Certificate URI SAN is not a SPIFFE ID')
-
-    try:
-        return SpiffeId(uri)
-    except SpiffeIdError as e:
-        raise X509CertificateError(
-            f'Certificate contains a malformed SPIFFE ID in the URI SAN: {uri!r}'
-        ) from e

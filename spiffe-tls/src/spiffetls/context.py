@@ -20,8 +20,10 @@ from typing import Callable, Optional
 from OpenSSL import SSL, crypto
 from cryptography.hazmat.primitives import serialization
 
+from spiffe.bundle.x509_bundle.x509_bundle_set import X509BundleSet
 from spiffe.workloadapi.x509_source import X509Source
 from spiffetls.errors import SslContextError
+from spiffetls.tlsconfig.verifier import build_verify_callback
 
 _logger: logging.Logger = logging.getLogger(__name__)
 
@@ -60,20 +62,14 @@ def create_ssl_context(
         _load_certificate_chain(ssl_context, x509_source)
         _load_ca_bundles(ssl_context, x509_source)
 
-        def verify_callback(
-            connection: SSL.Connection,
-            x509: crypto.X509,
-            errno: int,
-            depth: int,
-            preverify_ok: int,
-        ) -> bool:
-            if not preverify_ok:
-                return False
-            if depth == 0 and authorize_fn:
-                # Perform custom verification at the leaf certificate
-                return authorize_fn(x509)
+        def bundle_set_provider() -> X509BundleSet:
+            return X509BundleSet.of(list(x509_source.bundles))
 
-            return bool(preverify_ok)
+        verify_callback = build_verify_callback(
+            bundle_set_provider,
+            authorize_fn,
+            allow_non_spiffe=use_system_trusted_cas,
+        )
 
         ssl_context.set_verify(verify_mode, verify_callback)
         x509_source.subscribe_for_updates(lambda: _on_source_update(ssl_context, x509_source))
