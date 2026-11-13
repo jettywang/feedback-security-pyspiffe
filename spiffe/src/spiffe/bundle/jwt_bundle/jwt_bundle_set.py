@@ -18,34 +18,59 @@ under the License.
 This module manages JwtBundleSet objects.
 """
 
-import threading
-from typing import Dict, Optional, List, Set
+from types import MappingProxyType
+from typing import TYPE_CHECKING, Iterable, Mapping, Optional, Union
+
 from spiffe.bundle.jwt_bundle.jwt_bundle import JwtBundle
 from spiffe.spiffe_id.spiffe_id import TrustDomain
 
 __all__ = ['JwtBundleSet']
 
+if TYPE_CHECKING:
+    from spiffe.bundle.jwt_bundle.jwt_bundle_set_builder import JwtBundleSetBuilder
+
 
 class JwtBundleSet(object):
-    """JwtBundleSet is a dictionary of JWTBundles objects, keyed by trust domain."""
+    """An immutable set of JWT bundles keyed by trust domain.
 
-    def __init__(self, bundles: Dict[TrustDomain, JwtBundle]) -> None:
-        """Creates a new JwtBundleSet initialized with the given JWT bundles objects keyed by TrustDomain.
+    A ``JwtBundleSet`` is a snapshot. The mapping and contained bundles cannot
+    be changed after construction. Use
+    :class:`~spiffe.bundle.jwt_bundle.jwt_bundle_set_builder.JwtBundleSetBuilder`
+    to construct or update a set.
+    """
+
+    __slots__ = ('_bundles',)
+
+    def __init__(
+        self, bundles: Optional[Mapping[Union[TrustDomain, str], JwtBundle]] = None
+    ) -> None:
+        """Creates a new immutable JwtBundleSet.
 
         Args:
-            bundles: A dictionary of JwtBundle objects keyed by TrustDomain to initialize the JwtBundleSet.
+            bundles: Bundles keyed by TrustDomain. The mapping is copied.
         """
-        self._lock = threading.Lock()
-        self._bundles: Dict[str, JwtBundle] = {}
 
+        by_name = {}
         if bundles:
             for trust_domain, bundle in bundles.items():
-                self._bundles[trust_domain.name] = bundle
+                name = _trust_domain_name(trust_domain)
+                if name != bundle.trust_domain.name:
+                    raise ValueError(
+                        'Bundle trust domain does not match the supplied trust domain'
+                    )
+                by_name[name] = bundle
+        object.__setattr__(self, '_bundles', MappingProxyType(by_name))
+
+    def __setattr__(self, name: str, value: object) -> None:
+        raise AttributeError(f'{type(self).__name__} is immutable')
+
+    def __delattr__(self, name: str) -> None:
+        raise AttributeError(f'{type(self).__name__} is immutable')
 
     @property
-    def bundles(self) -> Set[JwtBundle]:
-        """Returns the set of all JwtBundles."""
-        return set(self._bundles.values())
+    def bundles(self) -> frozenset[JwtBundle]:
+        """Returns an immutable set of all JwtBundles."""
+        return frozenset(self._bundles.values())
 
     def get_bundle_for_trust_domain(self, trust_domain: TrustDomain) -> Optional[JwtBundle]:
         """Returns the JWT bundle of the given trust domain.
@@ -54,33 +79,41 @@ class JwtBundleSet(object):
             trust_domain: The TrustDomain to get a JwtBundle.
 
         Returns:
-            A JwtBundle object for the given TrustDomain.
+            An immutable JwtBundle snapshot for the given TrustDomain.
             None if the TrustDomain is not found in the set.
         """
-        with self._lock:
-            return self._bundles.get(trust_domain.name)
-
-    def put(self, jwt_bundle: JwtBundle) -> None:
-        """Adds a new bundle into the set.
-
-        If a bundle already exists for the trust domain, the existing bundle is
-        replaced.
-
-        Args:
-            jwt_bundle: The new JwtBundle to add.
-        """
-        with self._lock:
-            self._bundles[jwt_bundle.trust_domain.name] = jwt_bundle
+        return self._bundles.get(trust_domain.name)
 
     @classmethod
-    def of(cls, bundle_list: List[JwtBundle]) -> 'JwtBundleSet':
-        """Creates a new initialized JwtBundleSet with the given JwtBundle objects keyed by TrustDomain.
+    def of(cls, bundle_list: Iterable[JwtBundle]) -> 'JwtBundleSet':
+        """Creates a new JwtBundleSet from the given bundle objects.
 
         Args:
-            bundle_list: A list JwtBundle objects to store in the new JwtBundleSet.
+            bundle_list: JwtBundle objects to store in the new JwtBundleSet.
         """
-        bundles = {}
-        for b in bundle_list:
-            bundles[b.trust_domain] = b
+        builder = cls.builder()
+        builder.put_bundles(bundle_list)
+        return builder.build()
 
-        return JwtBundleSet(bundles)
+    @classmethod
+    def builder(
+        cls,
+        bundles: Optional[Mapping[Union[TrustDomain, str], JwtBundle]] = None,
+    ) -> 'JwtBundleSetBuilder':
+        """Creates a builder for constructing or updating a JwtBundleSet."""
+        from spiffe.bundle.jwt_bundle.jwt_bundle_set_builder import JwtBundleSetBuilder
+
+        return JwtBundleSetBuilder(bundles)
+
+    def __eq__(self, o: object) -> bool:
+        if not isinstance(o, JwtBundleSet):
+            return False
+        return self._bundles == o._bundles
+
+    def __hash__(self) -> int:
+        return hash(frozenset(self._bundles.items()))
+
+
+def _trust_domain_name(trust_domain: Union[TrustDomain, str]) -> str:
+    return trust_domain if isinstance(trust_domain, str) else trust_domain.name
+

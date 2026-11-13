@@ -69,11 +69,12 @@ class TrustDomainError(PySpiffeError):
 
 class TrustDomain:
     """
-    Represents the name of a SPIFFE Trust Domain.
+    Represents an immutable SPIFFE Trust Domain name.
 
     Trust domain names are stored in lowercase canonical form; input may use
     mixed case in the domain labels. The TrustDomain can be initialized with a
     name or a full SPIFFE ID, from which the trust domain part is extracted.
+    Once constructed, a TrustDomain cannot be changed.
 
     Examples:
         >>> td = TrustDomain("example.org")
@@ -85,12 +86,20 @@ class TrustDomain:
         example.org
     """
 
+    __slots__ = ('_name',)
+
     def __init__(self, id_or_name: str) -> None:
-        self._name = extract_and_validate_trust_domain(id_or_name)
+        object.__setattr__(self, '_name', extract_and_validate_trust_domain(id_or_name))
 
     @property
     def name(self) -> str:
         return self._name
+
+    def __setattr__(self, name: str, value: object) -> None:
+        raise AttributeError('TrustDomain is immutable')
+
+    def __delattr__(self, name: str) -> None:
+        raise AttributeError('TrustDomain is immutable')
 
     def as_spiffe_id(self) -> str:
         return f"{SCHEME_PREFIX}{self._name}"

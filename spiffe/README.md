@@ -129,6 +129,24 @@ with JwtSource() as source:
     print(f'Token: {jwt_svid.token}')
 ```
 
+### Bundle snapshots
+
+Bundles and bundle sets returned by sources are immutable snapshots. Holding
+one does not expose the source's trust material to later changes, and a source
+update cannot alter a snapshot already returned to a caller. Build or update
+bundles explicitly through their builders:
+
+```python
+from spiffe import TrustDomain, X509Bundle, X509BundleSet
+
+trust_domain = TrustDomain('example.org')
+bundle = X509Bundle.builder(trust_domain, authorities).build()
+bundle_set = X509BundleSet.builder().put(bundle).build()
+```
+
+`JwtBundle`, `JwtBundleSet`, `X509BundleBuilder`, `JwtBundleBuilder`, and the
+bundle-set builders follow the same pattern.
+
 ## Contributing
 
 We welcome contributions to the `spiffe` package! Please see

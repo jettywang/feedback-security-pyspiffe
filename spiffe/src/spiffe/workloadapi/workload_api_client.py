@@ -710,6 +710,7 @@ class WorkloadApiClient:
     ) -> X509Context:
         svids = []
         bundle_set = self._create_x509_bundle_set(x509_svid_response.federated_bundles)
+        builder = X509BundleSet.builder().put_bundles(bundle_set.bundles)
         for svid, selected in _select_first_svid_per_hint(x509_svid_response.svids):
             # An SVID ignored for a duplicate hint still carries the bundle of its trust domain,
             # so the bundle is kept. It is keyed by the trust domain of the validated leaf, hence
@@ -727,9 +728,9 @@ class WorkloadApiClient:
 
             if selected:
                 svids.append(x509_svid)
-            bundle_set.put(bundle)
+            builder.put(bundle)
 
-        return X509Context(svids, bundle_set)
+        return X509Context(svids, builder.build())
 
     def _process_jwt_bundles(
         self, jwt_bundles_response: workload_pb2.JWTBundlesResponse

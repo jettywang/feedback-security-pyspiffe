@@ -43,7 +43,8 @@ def test_parse_raw_bundle_single_authority() -> None:
     assert x509_bundle.trust_domain == trust_domain
     assert len(x509_bundle.x509_authorities) == 1
 
-    authority = x509_bundle.x509_authorities.pop()
+    assert isinstance(x509_bundle.x509_authorities, frozenset)
+    (authority,) = x509_bundle.x509_authorities
     assert isinstance(authority, Certificate)
     assert 'CN=PEMUTILTEST1' == authority.subject.rfc4514_string()
 
@@ -57,11 +58,10 @@ def test_parse_raw_bundle_multiple_authorities() -> None:
     assert len(x509_bundle.x509_authorities) == 2
 
     expected_subjects = ['O=SPIRE,C=US', 'O=SPIFFE,C=US']
-    authority1 = x509_bundle.x509_authorities.pop()
+    authority1, authority2 = x509_bundle.x509_authorities
     assert isinstance(authority1, Certificate)
     assert authority1.subject.rfc4514_string() in expected_subjects
 
-    authority2 = x509_bundle.x509_authorities.pop()
     assert isinstance(authority2, Certificate)
     assert authority2.subject.rfc4514_string() in expected_subjects
 
@@ -73,7 +73,8 @@ def test_parse_bundle_single_authority() -> None:
 
     assert x509_bundle.trust_domain == trust_domain
     assert len(x509_bundle.x509_authorities) == 1
-    authority = x509_bundle.x509_authorities.pop()
+    assert isinstance(x509_bundle.x509_authorities, frozenset)
+    (authority,) = x509_bundle.x509_authorities
     assert isinstance(authority, Certificate)
     assert 'CN=PEMUTILTEST1' == authority.subject.rfc4514_string()
 
@@ -87,11 +88,10 @@ def test_parse_bundle_multiple_authorities() -> None:
     assert len(x509_bundle.x509_authorities) == 2
 
     expected_subjects = ['CN=PEMUTILTEST1', 'CN=PEMUTILTEST2']
-    authority1 = x509_bundle.x509_authorities.pop()
+    authority1, authority2 = x509_bundle.x509_authorities
     assert isinstance(authority1, Certificate)
     assert authority1.subject.rfc4514_string() in expected_subjects
 
-    authority2 = x509_bundle.x509_authorities.pop()
     assert isinstance(authority2, Certificate)
     assert authority2.subject.rfc4514_string() in expected_subjects
 
@@ -129,11 +129,10 @@ def test_load_bundle() -> None:
     assert len(x509_bundle.x509_authorities) == 2
 
     expected_subjects = ['CN=PEMUTILTEST1', 'CN=PEMUTILTEST2']
-    authority1 = x509_bundle.x509_authorities.pop()
+    authority1, authority2 = x509_bundle.x509_authorities
     assert isinstance(authority1, Certificate)
     assert authority1.subject.rfc4514_string() in expected_subjects
 
-    authority2 = x509_bundle.x509_authorities.pop()
     assert isinstance(authority2, Certificate)
     assert authority2.subject.rfc4514_string() in expected_subjects
 
@@ -175,11 +174,10 @@ def test_save_bundle_pem_encoded(tmpdir: str) -> None:
     assert len(saved_bundle.x509_authorities) == 2
 
     expected_subjects = ['CN=PEMUTILTEST1', 'CN=PEMUTILTEST2']
-    authority1 = saved_bundle.x509_authorities.pop()
+    authority1, authority2 = saved_bundle.x509_authorities
     assert isinstance(authority1, Certificate)
     assert authority1.subject.rfc4514_string() in expected_subjects
 
-    authority2 = saved_bundle.x509_authorities.pop()
     assert isinstance(authority2, Certificate)
     assert authority2.subject.rfc4514_string() in expected_subjects
 
@@ -198,11 +196,10 @@ def test_save_bundle_der_encoded(tmpdir: str) -> None:
     assert len(saved_bundle.x509_authorities) == 2
 
     expected_subjects = ['CN=PEMUTILTEST1', 'CN=PEMUTILTEST2']
-    authority1 = saved_bundle.x509_authorities.pop()
+    authority1, authority2 = saved_bundle.x509_authorities
     assert isinstance(authority1, Certificate)
     assert authority1.subject.rfc4514_string() in expected_subjects
 
-    authority2 = saved_bundle.x509_authorities.pop()
     assert isinstance(authority2, Certificate)
     assert authority2.subject.rfc4514_string() in expected_subjects
 
@@ -241,36 +238,60 @@ def test_save_error_writing_bundle_to_file(mocker: MockerFixture) -> None:
 
 
 def test_add_and_remove_authority() -> None:
-    bundle = X509Bundle(trust_domain, None)
     pem_certs = pem.parse_file(TEST_BUNDLE_CERTS_DIR / 'certs.pem')
     x509_cert_1 = x509.load_pem_x509_certificate(pem_certs[0].as_bytes(), default_backend())
     x509_cert_2 = x509.load_pem_x509_certificate(pem_certs[1].as_bytes(), default_backend())
 
-    # adding an object to the returned set, as it is a copy, it doesn't change the bundle
-    bundle.x509_authorities.add(x509_cert_1)
-    assert len(bundle.x509_authorities) == 0
-
-    bundle.add_authority(x509_cert_1)
-    bundle.add_authority(x509_cert_2)
+    builder = X509Bundle.builder(trust_domain)
+    builder.add_authority(x509_cert_1)
+    builder.add_authority(x509_cert_2)
+    bundle = builder.build()
     assert len(bundle.x509_authorities) == 2
 
-    # repeat the adds
-    bundle.add_authority(x509_cert_1)
-    bundle.add_authority(x509_cert_2)
-    assert len(bundle.x509_authorities) == 2
+    # The returned authority collection is immutable.
+    with pytest.raises(AttributeError):
+        bundle.x509_authorities.add(x509_cert_1)  # type: ignore[attr-defined]
 
-    for a in bundle.x509_authorities:
-        assert isinstance(a, Certificate)
-        assert 'CN=PEMUTILTEST' in a.subject.rfc4514_string()
+    # Repeating an add has no effect once the snapshot is built.
+    builder.add_authority(x509_cert_1)
+    assert len(builder.build().x509_authorities) == 2
 
-    bundle.remove_authority(x509_cert_1)
-    assert len(bundle.x509_authorities) == 1
-    bundle.remove_authority(x509_cert_2)
-    assert len(bundle.x509_authorities) == 0
+    for authority in bundle.x509_authorities:
+        assert isinstance(authority, Certificate)
+        assert 'CN=PEMUTILTEST' in authority.subject.rfc4514_string()
 
-    # removing an authority that is not present, do nothing
-    bundle.remove_authority(x509_cert_1)
-    bundle.remove_authority(x509_cert_2)
+    builder.remove_authority(x509_cert_1)
+    assert len(builder.build().x509_authorities) == 1
+    builder.remove_authority(x509_cert_2)
+    assert len(builder.build().x509_authorities) == 0
+
+    # Removing an authority that is not present does nothing.
+    builder.remove_authority(x509_cert_1)
+    builder.remove_authority(x509_cert_2)
+
+
+def test_builder_snapshot_does_not_change_after_further_builder_updates() -> None:
+    bundle_bytes = read_bytes('certs.pem')
+    first = X509Bundle.parse(trust_domain, bundle_bytes)
+    second = X509Bundle.builder(trust_domain).add_authorities(
+        list(reversed(list(first.x509_authorities)))
+    ).build()
+
+    assert first.x509_authorities == second.x509_authorities
+    assert first == second
+    assert hash(first) == hash(second)
+
+
+def test_bundle_authorities_cannot_be_replaced_or_mutated() -> None:
+    bundle = X509Bundle.parse(trust_domain, read_bytes('certs.pem'))
+    original = bundle.x509_authorities
+
+    with pytest.raises(AttributeError):
+        bundle.x509_authorities = frozenset()  # type: ignore[misc]
+    with pytest.raises(AttributeError):
+        original.add(next(iter(original)))  # type: ignore[attr-defined]
+
+    assert bundle.x509_authorities is original
 
 
 def test_not_equal_when_different_objects() -> None:

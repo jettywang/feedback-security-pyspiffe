@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased]
+
+### Changed
+- **Bundles:** `X509Bundle`, `JwtBundle`, `X509BundleSet`, and `JwtBundleSet` are now immutable snapshots. Their authority collections and trust-domain mappings cannot be modified after construction, and bundles returned by `X509Source`/`JwtSource` remain unchanged when the source publishes a newer generation. Construction and updates use explicit `X509BundleBuilder`, `JwtBundleBuilder`, `X509BundleSetBuilder`, and `JwtBundleSetBuilder` classes, available via the new `X509Bundle.builder()`, `JwtBundle.builder()`, `X509BundleSet.builder()`, and `JwtBundleSet.builder()` entry points. Bundle hashes are computed from canonical authority bytes, so they are stable regardless of insertion or iteration order.
+
 ## [0.4.0] - 2026-10-29
 
 ### Added

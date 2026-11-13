@@ -44,7 +44,7 @@ def test_create_jwt_bundle_set() -> None:
 
     # check that the bundle was copied
     assert jwt_bundle_set._bundles is not fake_bundles
-    assert len(jwt_bundle_set._bundles) == len(fake_bundles.keys())
+    assert len(jwt_bundle_set._bundles) == len(fake_bundles)
     assert jwt_bundle_set.get_bundle_for_trust_domain(trust_domain_1) == jwt_bundle_1
     assert jwt_bundle_set.get_bundle_for_trust_domain(trust_domain_2) == jwt_bundle_2
 
@@ -52,7 +52,6 @@ def test_create_jwt_bundle_set() -> None:
 def test_create_jwt_bundle_set_no_bundle() -> None:
     jwt_bundle_set = JwtBundleSet({})
 
-    assert isinstance(jwt_bundle_set._bundles, dict)
     assert len(jwt_bundle_set._bundles) == 0
 
 
@@ -64,7 +63,10 @@ def test_put_bundle() -> None:
     assert jwt_bundle_set._bundles[trust_domain_1.name] == jwt_bundle
 
     new_jwt_bundle = JwtBundle(trust_domain_2, authorities)
-    jwt_bundle_set.put(new_jwt_bundle)
+    builder = jwt_bundle_set.builder()
+    builder.put(jwt_bundle)
+    builder.put(new_jwt_bundle)
+    jwt_bundle_set = builder.build()
 
     assert len(jwt_bundle_set._bundles) == 2
     assert jwt_bundle_set._bundles[trust_domain_1.name] == jwt_bundle
@@ -78,7 +80,7 @@ def test_put_bundle_on_empty_set() -> None:
 
     jwt_bundle = JwtBundle(trust_domain_1, authorities)
 
-    jwt_bundle_set.put(jwt_bundle)
+    jwt_bundle_set = jwt_bundle_set.builder().put(jwt_bundle).build()
 
     assert len(jwt_bundle_set._bundles) == 1
     assert list(jwt_bundle_set._bundles.keys())[0] == trust_domain_1.name
@@ -92,7 +94,7 @@ def test_put_replace_bundle_for_trust_domain() -> None:
     assert jwt_bundle_set._bundles[trust_domain_1.name] == jwt_bundle
 
     new_jwt_bundle = JwtBundle(trust_domain_1, authorities)
-    jwt_bundle_set.put(new_jwt_bundle)
+    jwt_bundle_set = jwt_bundle_set.builder().put(new_jwt_bundle).build()
 
     assert len(jwt_bundle_set._bundles) == 1
     assert jwt_bundle_set._bundles[trust_domain_1.name] == new_jwt_bundle

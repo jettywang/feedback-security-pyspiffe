@@ -47,14 +47,14 @@ def test_create_jwt_bundle() -> None:
     jwt_bundle = JwtBundle(trust_domain, authorities)
 
     assert jwt_bundle.trust_domain == trust_domain
-    assert len(jwt_bundle.jwt_authorities.keys()) == len(authorities.keys())
+    assert len(jwt_bundle.jwt_authorities) == len(authorities)
 
 
 def test_create_jwt_bundle_no_authorities() -> None:
     jwt_bundle = JwtBundle(trust_domain, {})
 
     assert jwt_bundle.trust_domain == trust_domain
-    assert isinstance(jwt_bundle.jwt_authorities, dict)
+    assert jwt_bundle.jwt_authorities == {}
     assert len(jwt_bundle.jwt_authorities.keys()) == 0
 
 
