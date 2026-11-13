@@ -17,7 +17,9 @@ under the License.
 import logging
 import threading
 import warnings
-from typing import Optional, Callable, List, FrozenSet
+from typing import Optional, Callable, FrozenSet, List, Tuple
+
+from cryptography.hazmat.primitives import serialization
 
 from spiffe.bundle.x509_bundle.x509_bundle_set import X509BundleSet
 from spiffe.bundle.x509_bundle.x509_bundle import X509Bundle
@@ -32,6 +34,52 @@ _logger = logging.getLogger(__name__)
 """
 This module provides an implementation of an X.509 Source.
 """
+
+# Canonical, comparable form of the identity material an X509Source consumer
+# (e.g. a TLS connection pool) actually depends on: the picked SVID's content
+# plus the trust material keyed by trust domain.
+_SvidFingerprint = Tuple[str, str, Tuple[bytes, ...], bytes]
+_BundleSetFingerprint = FrozenSet[Tuple[str, FrozenSet[bytes]]]
+_IdentityFingerprint = Tuple[_SvidFingerprint, _BundleSetFingerprint]
+
+
+def _svid_fingerprint(svid: X509Svid) -> _SvidFingerprint:
+    """Returns a content-based fingerprint of an X509Svid.
+
+    Two SVIDs are considered the same identity material when their SPIFFE ID,
+    hint, certificate chain (DER, in chain order) and private key (DER) are all
+    equal, regardless of the Python objects carrying them.
+    """
+    chain_bytes = tuple(
+        cert.public_bytes(serialization.Encoding.DER) for cert in svid.cert_chain
+    )
+    key_bytes = svid.private_key.private_bytes(
+        serialization.Encoding.DER,
+        serialization.PrivateFormat.PKCS8,
+        serialization.NoEncryption(),
+    )
+    return (str(svid.spiffe_id), svid.hint, chain_bytes, key_bytes)
+
+
+def _bundle_set_fingerprint(bundle_set: X509BundleSet) -> _BundleSetFingerprint:
+    """Returns a content-based fingerprint of an X509BundleSet.
+
+    The fingerprint is a mapping of trust domain name to the set of its
+    authority certificates (DER). It is insensitive to the order in which
+    authorities appear inside a bundle and to the order of bundles in the set,
+    but changes whenever a trust domain is added or removed or any authority
+    certificate is added, removed or replaced.
+    """
+    return frozenset(
+        (
+            bundle.trust_domain.name,
+            frozenset(
+                authority.public_bytes(serialization.Encoding.DER)
+                for authority in bundle.x509_authorities
+            ),
+        )
+        for bundle in bundle_set.bundles
+    )
 
 
 class X509Source:
@@ -87,6 +135,8 @@ class X509Source:
         self._closed = False
         self._lock = threading.Lock()
         self._subscribers: List[Callable[[], None]] = []
+        self._identity_subscribers: List[Callable[[X509Context], None]] = []
+        self._identity_fingerprint: Optional[_IdentityFingerprint] = None
         self._subscribers_lock = threading.Lock()
 
         # Track ownership: if we create the client, we own it
@@ -268,6 +318,72 @@ class X509Source:
             except ValueError:
                 pass
 
+    def subscribe_for_identity_changes(
+        self, callback: Callable[[X509Context], None]
+    ) -> None:
+        """
+        Registers a callback that is invoked only when the effective identity
+        material of this source changes, unlike `subscribe_for_updates`, which
+        fires on every Workload API frame.
+
+        The identity material is compared by cryptographic content, not by
+        object identity:
+
+        - SVID: the SVID selected by the configured `svid_picker` (or the
+          default SVID) is compared by SPIFFE ID, hint, certificate chain
+          (DER, in chain order) and private key (DER). A certificate rotation
+          (new key/certificates for the same SPIFFE ID) and a change of the
+          picked identity both trigger the callback; changes confined to
+          SVIDs that are not picked do not.
+        - Trust material: the bundle set is compared as a mapping of trust
+          domain name to the set of its authority certificates (DER).
+          Reordering certificates inside a bundle or bundles inside the set
+          does not trigger the callback; adding or removing a trust domain,
+          or adding, removing or replacing an authority, does.
+
+        Each Workload API frame that changes the identity material produces
+        exactly one invocation, in stream order: consecutive rotations and
+        trust domain removals are never coalesced or dropped. Frames that do
+        not change the identity material produce no invocation.
+
+        The callback receives the coherent X509Context snapshot committed for
+        that change (the picked SVID and the bundle set); the snapshot is
+        never mutated or replaced by later frames, so it is safe to hold onto
+        it. Callbacks are invoked without holding any source lock, so they
+        may call `get_x509_context()`, `unsubscribe_for_identity_changes()` or
+        any other method of this source without deadlocking.
+
+        A subscriber is eligible for the notification of a change only if it
+        was registered before that change was committed; a registration
+        racing an update may or may not observe that update's notification,
+        but never observes a partially committed state. New subscribers are
+        not replayed the current state: read `get_x509_context()` after
+        subscribing to learn it.
+
+        Args:
+            callback (Callable[[X509Context], None]): The callback function to
+                register. It receives the X509Context snapshot of each change.
+        """
+        with self._subscribers_lock:
+            self._identity_subscribers.append(callback)
+
+    def unsubscribe_for_identity_changes(
+        self, callback: Callable[[X509Context], None]
+    ) -> None:
+        """
+        Unregisters a callback previously registered with
+        `subscribe_for_identity_changes`.
+
+        Args:
+            callback (Callable[[X509Context], None]): The callback function to
+                unregister.
+        """
+        with self._subscribers_lock:
+            try:
+                self._identity_subscribers.remove(callback)
+            except ValueError:
+                pass
+
     def _start_watcher(self) -> None:
         cancel_handler = self._workload_api_client.stream_x509_contexts(
             self._set_context, self._on_error
@@ -288,14 +404,28 @@ class X509Source:
             return
 
         _logger.debug('X.509 Source: setting new update')
+        fingerprint = (
+            _svid_fingerprint(svid),
+            _bundle_set_fingerprint(x509_context.x509_bundle_set),
+        )
         with self._lock:
             self._x509_svid = svid
             self._x509_bundle_set = x509_context.x509_bundle_set
+            identity_changed = self._identity_fingerprint != fingerprint
+            self._identity_fingerprint = fingerprint
+            identity_snapshot = X509Context(
+                x509_svids=[svid],
+                x509_bundle_set=X509BundleSet.of(
+                    list(x509_context.x509_bundle_set.bundles)
+                ),
+            )
 
         # Signal that the X509Source has been successfully initialized
         self._initialization_event.set()
 
         self._notify_subscribers()
+        if identity_changed:
+            self._notify_identity_subscribers(identity_snapshot)
 
     def _notify_subscribers(self) -> None:
         with self._subscribers_lock:
@@ -305,6 +435,17 @@ class X509Source:
                 callback()
             except Exception as err:
                 _logger.exception(f"An error occurred while notifying a subscriber: {err}")
+
+    def _notify_identity_subscribers(self, x509_context: X509Context) -> None:
+        with self._subscribers_lock:
+            subscribers = list(self._identity_subscribers)
+        for callback in subscribers:
+            try:
+                callback(x509_context)
+            except Exception as err:
+                _logger.exception(
+                    f"An error occurred while notifying an identity change subscriber: {err}"
+                )
 
     def _on_error(self, error: Exception) -> None:
         self._log_error(error)
