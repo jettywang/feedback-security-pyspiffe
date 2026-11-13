@@ -23,6 +23,7 @@ from json import JSONDecodeError
 from jwt.api_jwk import PyJWKSet
 from jwt.exceptions import InvalidKeyError, PyJWKSetError
 from typing import Dict, Union, Optional
+from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec, rsa, dsa, ed25519, ed448
 
 from spiffe.spiffe_id.spiffe_id import TrustDomain
@@ -36,6 +37,18 @@ _PUBLIC_KEY_TYPES = Union[
     ed25519.Ed25519PublicKey,
     ed448.Ed448PublicKey,
 ]
+
+
+def _public_key_identifier(public_key: _PUBLIC_KEY_TYPES) -> bytes:
+    """Returns a canonical, algorithm-independent identifier for a public key.
+
+    Two JWKs represent the same public key when their DER-encoded
+    SubjectPublicKeyInfo is identical, regardless of the JWKS array order.
+    """
+    return public_key.public_bytes(
+        encoding=serialization.Encoding.DER,
+        format=serialization.PublicFormat.SubjectPublicKeyInfo,
+    )
 
 
 class JwtBundle(object):
@@ -98,6 +111,10 @@ class JwtBundle(object):
     def parse(cls, trust_domain: TrustDomain, bundle_bytes: bytes) -> 'JwtBundle':
         """Parses a bundle from bytes. The data must be a standard RFC 7517 JWKS document.
 
+        Duplicate "kid" values are resolved by comparing the keys, not by JWKS array
+        order: a repeated representation of the same public key is accepted, while two
+        different public keys sharing the same "kid" make the whole parse fail.
+
         Args:
             trust_domain: A TrustDomain to associate to the bundle.
             bundle_bytes: An array of bytes that represents a set of JWKs.
@@ -107,7 +124,8 @@ class JwtBundle(object):
 
         Raises:
             ArgumentError: In case the trust_domain is empty or bundle_bytes is empty.
-            ParseJWTBundleError: In case the set of jwt_authorities cannot be parsed from the bundle_bytes.
+            ParseJWTBundleError: In case the jwt_authorities cannot be parsed from bundle_bytes,
+                including when two different keys declare the same "kid".
         """
 
         if not trust_domain:
@@ -125,6 +143,15 @@ class JwtBundle(object):
                     raise ParseJWTBundleError(
                         'Error adding authority from JWKS: "keyID" cannot be empty'
                     )
+
+                existing_key = jwt_authorities.get(jwk.key_id)
+                if existing_key is not None:
+                    if _public_key_identifier(existing_key) != _public_key_identifier(jwk.key):
+                        raise ParseJWTBundleError(
+                            f'Error adding authority from JWKS: conflicting keys '
+                            f'found for the same key ID: {jwk.key_id}'
+                        )
+                    continue
 
                 jwt_authorities[jwk.key_id] = jwk.key
 

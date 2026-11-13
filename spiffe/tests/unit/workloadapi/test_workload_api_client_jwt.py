@@ -14,6 +14,7 @@ License for the specific language governing permissions and limitations
 under the License.
 """
 
+import json
 from collections import deque
 from collections.abc import Iterator
 from typing import Callable, Generic, List, TypeVar
@@ -23,6 +24,8 @@ import pytest
 import datetime
 import grpc
 import threading
+from cryptography.hazmat.primitives.asymmetric import rsa
+from jwt.algorithms import RSAAlgorithm
 from pytest_mock import MockerFixture
 
 from spiffe._proto import workload_pb2
@@ -565,6 +568,45 @@ def test_fetch_jwt_bundles_error_parsing_jwks(
     )
 
 
+def _jwks_with_conflicting_kid() -> bytes:
+    first_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    second_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    first_jwk = RSAAlgorithm.to_jwk(first_key.public_key(), as_dict=True)
+    first_jwk['kid'] = 'shared-kid'
+    second_jwk = RSAAlgorithm.to_jwk(second_key.public_key(), as_dict=True)
+    second_jwk['kid'] = 'shared-kid'
+    return json.dumps({'keys': [first_jwk, second_jwk]}).encode('utf-8')
+
+
+def test_fetch_jwt_bundles_conflicting_kid_fails_without_half_new_bundle(
+    mocker: MockerFixture, client: WorkloadApiClient
+) -> None:
+    valid_bundles = {'example.org': JWKS_1_EC_KEY}
+    client._spiffe_workload_api_stub.FetchJWTBundles = mocker.Mock(
+        return_value=iter(
+            [workload_pb2.JWTBundlesResponse(bundles=dict(valid_bundles))]
+        )
+    )
+    previous_set = client.fetch_jwt_bundles()
+
+    bad_update = {
+        'example.org': JWKS_1_EC_KEY,
+        'domain.test': _jwks_with_conflicting_kid(),
+    }
+    client._spiffe_workload_api_stub.FetchJWTBundles = mocker.Mock(
+        return_value=iter([workload_pb2.JWTBundlesResponse(bundles=bad_update)])
+    )
+
+    with pytest.raises(FetchJwtBundleError) as exc_info:
+        client.fetch_jwt_bundles()
+
+    # The diagnostic names the key id, never the token or key material.
+    assert 'shared-kid' in str(exc_info.value)
+    # The failed update produced no partial set; the previously fetched bundle is untouched.
+    assert previous_set.get_bundle_for_trust_domain(TrustDomain('example.org')) is not None
+    assert previous_set.get_bundle_for_trust_domain(TrustDomain('domain.test')) is None
+
+
 def test_fetch_jwt_bundles_raise_grpc_call(
     mocker: MockerFixture, client: WorkloadApiClient
 ) -> None:
@@ -741,6 +783,45 @@ def _jwt_stream_response(
     bundles: dict[str, bytes] | None = None,
 ) -> workload_pb2.JWTBundlesResponse:
     return workload_pb2.JWTBundlesResponse(bundles=bundles or {'example.org': JWKS_1_EC_KEY})
+
+
+def test_stream_jwt_bundles_conflicting_kid_fails_update_without_partial_bundle(
+    mocker: MockerFixture, client: WorkloadApiClient
+) -> None:
+    fetch_jwt_bundles = mocker.Mock(
+        return_value=_FakeStream(
+            [
+                _jwt_stream_response(),
+                _jwt_stream_response(
+                    {'example.org': JWKS_1_EC_KEY, 'domain.test': _jwks_with_conflicting_kid()}
+                ),
+            ]
+        )
+    )
+    client._spiffe_workload_api_stub.FetchJWTBundles = fetch_jwt_bundles
+    cancel_handler = StreamCancelHandler()
+    responses: list[JwtBundleSet] = []
+    errors: list[Exception] = []
+
+    def on_success(response: JwtBundleSet) -> None:
+        responses.append(response)
+
+    def on_error(error: Exception) -> None:
+        errors.append(error)
+        cancel_handler.cancel()
+
+    client._watch_jwt_bundles_updates(
+        cancel_handler,
+        RetryHandler(RetryPolicy(base_backoff_in_seconds=0)),
+        on_success,
+        on_error,
+    )
+
+    assert len(responses) == 1
+    assert len(errors) == 1
+    assert 'shared-kid' in str(errors[0])
+    assert responses[0].get_bundle_for_trust_domain(TrustDomain('example.org')) is not None
+    assert responses[0].get_bundle_for_trust_domain(TrustDomain('domain.test')) is None
 
 
 def test_stream_jwt_bundles_reconnects_after_eof_and_delivers_rotated_update(

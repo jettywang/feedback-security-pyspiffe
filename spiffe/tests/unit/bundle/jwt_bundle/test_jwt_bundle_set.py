@@ -15,8 +15,11 @@ under the License.
 """
 
 from typing import Dict
+import json
+
 from cryptography.hazmat.primitives.asymmetric import rsa, ec
 from cryptography.hazmat.backends import default_backend
+from jwt.algorithms import RSAAlgorithm
 
 from spiffe.bundle.jwt_bundle.jwt_bundle import JwtBundle, _PUBLIC_KEY_TYPES
 from spiffe.bundle.jwt_bundle.jwt_bundle_set import JwtBundleSet
@@ -124,3 +127,29 @@ def test_get_empty_set() -> None:
     res = jwt_bundle_set.get_bundle_for_trust_domain(trust_domain_1)
 
     assert res is None
+
+
+def test_same_kid_in_different_trust_domains_is_not_a_conflict() -> None:
+    key_1 = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    key_2 = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+
+    jwk_1 = RSAAlgorithm.to_jwk(key_1.public_key(), as_dict=True)
+    jwk_1['kid'] = 'shared-kid'
+    jwk_2 = RSAAlgorithm.to_jwk(key_2.public_key(), as_dict=True)
+    jwk_2['kid'] = 'shared-kid'
+
+    bundle_1 = JwtBundle.parse(
+        trust_domain_1, json.dumps({'keys': [jwk_1]}).encode('utf-8')
+    )
+    bundle_2 = JwtBundle.parse(
+        trust_domain_2, json.dumps({'keys': [jwk_2]}).encode('utf-8')
+    )
+
+    jwt_bundle_set = JwtBundleSet.of([bundle_1, bundle_2])
+
+    assert jwt_bundle_set.get_bundle_for_trust_domain(trust_domain_1) == bundle_1
+    assert jwt_bundle_set.get_bundle_for_trust_domain(trust_domain_2) == bundle_2
+    assert (
+        bundle_1.get_jwt_authority('shared-kid')
+        != bundle_2.get_jwt_authority('shared-kid')
+    )
