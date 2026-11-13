@@ -11,6 +11,7 @@ dependencies = [
 ]
 
 [project.scripts]
+workload-failure-demo = "py_spiffe_examples.workload_failure_demo.cli:main"
 mtls-smoke-client = "py_spiffe_examples.mtls_smoke_client:main"
 mtls-smoke-server = "py_spiffe_examples.mtls_smoke_server:main"
 httpx-stdlib-mtls-client = "py_spiffe_examples.httpx_stdlib_mtls_client:main"
