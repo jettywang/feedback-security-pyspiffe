@@ -2,6 +2,12 @@
 from .workloadapi.x509_source import X509Source
 from .workloadapi.jwt_source import JwtSource
 from .workloadapi.workload_api_client import WorkloadApiClient
+from .workloadapi.svid_selector import (
+    TargetSvidSelector,
+    SvidSelectorError,
+    TargetSvidNotFoundError,
+    AmbiguousTargetSvidError,
+)
 
 from .spiffe_id.spiffe_id import SpiffeId, TrustDomain
 from .svid.x509_svid import X509Svid
@@ -15,6 +21,10 @@ __all__ = [
     "X509Source",
     "JwtSource",
     "WorkloadApiClient",
+    "TargetSvidSelector",
+    "SvidSelectorError",
+    "TargetSvidNotFoundError",
+    "AmbiguousTargetSvidError",
     "SpiffeId",
     "TrustDomain",
     "X509Svid",

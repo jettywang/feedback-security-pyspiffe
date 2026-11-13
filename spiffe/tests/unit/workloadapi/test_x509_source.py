@@ -28,6 +28,7 @@ from spiffe._proto import workload_pb2
 from spiffe.spiffe_id.spiffe_id import SpiffeId
 from spiffe.spiffe_id.spiffe_id import TrustDomain
 from spiffe.workloadapi.errors import X509SourceError, WorkloadApiError
+from spiffe.workloadapi.svid_selector import TargetSvidSelector
 from spiffe.workloadapi.x509_context import X509Context
 from spiffe.workloadapi.x509_source import X509Source
 
@@ -491,3 +492,117 @@ def test_x509_source_unsubscribe_missing_callback(
     # Unsubscribe a callback that was never subscribed - should not raise
     callback = mocker.MagicMock()
     x509_source.unsubscribe_for_updates(callback)  # Should not raise ValueError
+
+
+def _context(svids: list[X509Svid]) -> X509Context:
+    return X509Context(svids, make_x509_context().x509_bundle_set)
+
+
+def _fresh_leaf_svid(spiffe_id: str, hint: str = '') -> X509Svid:
+    import datetime
+
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.x509.oid import NameOID
+
+    key = ec.generate_private_key(ec.SECP256R1())
+    now = datetime.datetime.now(datetime.timezone.utc)
+    name = x509.Name([x509.NameAttribute(NameOID.ORGANIZATION_NAME, 'test')])
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(name)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now)
+        .not_valid_after(now + datetime.timedelta(hours=1))
+        .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
+        .add_extension(
+            x509.SubjectAlternativeName([x509.UniformResourceIdentifier(spiffe_id)]),
+            critical=False,
+        )
+        .sign(key, hashes.SHA256())
+    )
+    return X509Svid(SpiffeId(spiffe_id), [cert], key, hint=hint)
+
+
+def test_x509_source_pins_svid_via_target_selector() -> None:
+    target = X509Svid.parse_raw(CHAIN1, KEY1, hint='internal')
+    other = X509Svid.parse_raw(CHAIN2, KEY2, hint='external')
+    fake_client = _FakeX509Client(_FakeCancelHandler(), x509_context=_context([other, target]))
+    selector = TargetSvidSelector('spiffe://example.org/service', hint='internal')
+
+    x509_source = X509Source(cast(WorkloadApiClient, fake_client), svid_picker=selector)
+
+    assert x509_source.get_x509_context().default_svid is target
+    x509_source.close()
+
+
+def test_x509_source_selector_keeps_identity_across_reordering() -> None:
+    target = X509Svid.parse_raw(CHAIN1, KEY1, hint='internal')
+    other = X509Svid.parse_raw(CHAIN2, KEY2, hint='external')
+    fake_client = _FakeX509Client(_FakeCancelHandler(), x509_context=_context([target]))
+    selector = TargetSvidSelector('spiffe://example.org/service')
+
+    x509_source = X509Source(cast(WorkloadApiClient, fake_client), svid_picker=selector)
+    assert x509_source.get_x509_context().default_svid is target
+
+    # A reordered update that still contains the pinned leaf must not switch identity.
+    assert fake_client.on_success is not None
+    fake_client.on_success(_context([other, target]))
+    assert x509_source.get_x509_context().default_svid is target
+    x509_source.close()
+
+
+def test_x509_source_selector_fails_closed_when_target_disappears() -> None:
+    target = X509Svid.parse_raw(CHAIN1, KEY1, hint='internal')
+    other = X509Svid.parse_raw(CHAIN2, KEY2, hint='external')
+    fake_client = _FakeX509Client(_FakeCancelHandler(), x509_context=_context([target]))
+    selector = TargetSvidSelector('spiffe://example.org/service', hint='internal')
+
+    x509_source = X509Source(cast(WorkloadApiClient, fake_client), svid_picker=selector)
+    assert not x509_source.is_closed()
+
+    # The target SPIFFE ID/hint disappears from the next update: the source fails closed.
+    assert fake_client.on_success is not None
+    fake_client.on_success(_context([other]))
+
+    assert x509_source.is_closed()
+    with pytest.raises(X509SourceError) as err:
+        x509_source.get_x509_context()
+    assert 'Failed to pick X509 SVID' in str(err.value)
+    # The last good SVID remains inspectable on the selector for diagnostics.
+    assert selector.selected is target
+
+
+def test_x509_source_selector_does_not_recover_after_fail_closed() -> None:
+    target = X509Svid.parse_raw(CHAIN1, KEY1, hint='internal')
+    fake_client = _FakeX509Client(_FakeCancelHandler(), x509_context=_context([target]))
+    selector = TargetSvidSelector('spiffe://example.org/service', hint='internal')
+
+    x509_source = X509Source(cast(WorkloadApiClient, fake_client), svid_picker=selector)
+    assert fake_client.on_success is not None
+    fake_client.on_success(_context([X509Svid.parse_raw(CHAIN2, KEY2)]))
+    assert x509_source.is_closed()
+
+    # Even a later update that would match again does not reopen the source.
+    fake_client.on_success(_context([target]))
+    assert x509_source.is_closed()
+    with pytest.raises(X509SourceError):
+        x509_source.get_x509_context()
+
+
+def test_x509_source_selector_raises_on_ambiguous_initial_update() -> None:
+    ambiguous_context = _context(
+        [
+            _fresh_leaf_svid('spiffe://example.org/service', 'a'),
+            _fresh_leaf_svid('spiffe://example.org/service', 'b'),
+        ]
+    )
+    fake_client = _FakeX509Client(_FakeCancelHandler(), x509_context=ambiguous_context)
+    selector = TargetSvidSelector('spiffe://example.org/service')
+
+    with pytest.raises(X509SourceError) as err:
+        X509Source(cast(WorkloadApiClient, fake_client), svid_picker=selector)
+    assert 'distinct X.509-SVIDs match' in str(err.value)

@@ -69,6 +69,8 @@ class X509Source:
             svid_picker: Function to choose the X.509 SVID from the list returned by the Workload API,
                     for example by `X509Svid.hint`. If it is not set, the default SVID is picked.
                     The picker is called on every Workload API update, not only during initialization.
+                    For pinning the source to a fixed SPIFFE ID (optionally restricted to a hint),
+                    use the reusable `spiffe.TargetSvidSelector` as the picker.
                     If it raises at any time, the X509Source fails closed: it is closed permanently and
                     does not recover when a later update would match again, so any TLS context built on
                     it (for example with spiffe-tls) stops working until a new source is created.
