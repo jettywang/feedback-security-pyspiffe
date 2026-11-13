@@ -15,20 +15,22 @@ under the License.
 """
 
 from typing import Tuple
-from unittest.mock import PropertyMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
+import warnings
 
 import pytest
 from OpenSSL import SSL
 from cryptography.hazmat.primitives import serialization
 
 from spiffe import X509Source, X509Svid, TrustDomain, X509Bundle, X509BundleSet
+from spiffe.workloadapi.x509_context import X509Context
 from spiffetls import create_ssl_context
 from testutils.certs import TEST_BUNDLE_CERTS_DIR
 from testutils.certs import TEST_CERTS_DIR
 
 
 @pytest.fixture
-def source_mocks() -> Tuple[MagicMock, PropertyMock, PropertyMock]:
+def source_mocks() -> Tuple[MagicMock, X509Context]:
     der_type = serialization.Encoding.DER
     chain_path = TEST_CERTS_DIR / '1-chain.der'
     key_path = TEST_CERTS_DIR / '1-key.der'
@@ -43,15 +45,12 @@ def source_mocks() -> Tuple[MagicMock, PropertyMock, PropertyMock]:
         der_type,
     )
     x509_bundle_set = X509BundleSet.of([bundle_1, bundle_2])
+    x509_context = X509Context([x509_svid], x509_bundle_set)
 
     x509_source_mock = MagicMock(spec=X509Source)
-    mock_svid = PropertyMock(return_value=x509_svid)
-    mock_bundles = PropertyMock(return_value=x509_bundle_set.bundles)
+    x509_source_mock.get_x509_context.return_value = x509_context
 
-    type(x509_source_mock).svid = mock_svid
-    type(x509_source_mock).bundles = mock_bundles
-
-    return x509_source_mock, mock_svid, mock_bundles
+    return x509_source_mock, x509_context
 
 
 @pytest.mark.parametrize(
@@ -65,10 +64,10 @@ def source_mocks() -> Tuple[MagicMock, PropertyMock, PropertyMock]:
 def test_create_ssl_context(
     method: int,
     use_system_trust_store: bool,
-    source_mocks: Tuple[MagicMock, PropertyMock, PropertyMock],
+    source_mocks: Tuple[MagicMock, X509Context],
 ) -> None:
     authorize_fn = MagicMock()
-    x509_source, mock_svid, mock_bundle = source_mocks
+    x509_source, x509_context = source_mocks
     with patch('OpenSSL.SSL.Context') as MockContext:
         ssl_context_instance = MockContext.return_value
 
@@ -89,5 +88,24 @@ def test_create_ssl_context(
         else:
             ssl_context_instance.set_default_verify_paths.assert_not_called()
 
-        assert mock_svid.call_count > 0, "Expected x509_source.svid to be accessed"
-        assert mock_bundle.call_count > 0, "Expected x509_source.bundles to be accessed"
+        # The whole configuration is built from a single coherent X509Context snapshot...
+        x509_source.get_x509_context.assert_called_once()
+        # ...and the deprecated split accessors must never be used.
+        x509_source.svid.assert_not_called()
+        x509_source.bundles.assert_not_called()
+        assert x509_context.default_svid.spiffe_id is not None
+
+
+def test_create_ssl_context_emits_no_deprecation_warning(
+    source_mocks: Tuple[MagicMock, X509Context],
+) -> None:
+    x509_source, _ = source_mocks
+
+    with warnings.catch_warnings(record=True) as warnings_record:
+        warnings.simplefilter("always")
+        create_ssl_context(SSL.TLS_CLIENT_METHOD, x509_source)
+
+    deprecation_warnings = [
+        str(w.message) for w in warnings_record if issubclass(w.category, DeprecationWarning)
+    ]
+    assert not deprecation_warnings, deprecation_warnings

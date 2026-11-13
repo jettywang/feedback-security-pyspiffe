@@ -53,8 +53,7 @@ import OpenSSL.SSL
 from cryptography import x509
 from OpenSSL import SSL, crypto
 
-from spiffe.workloadapi.x509_source import X509Source
-from spiffetls.context import create_ssl_context
+from spiffetls.context import X509ContextSource, RefreshingSSLContext, create_ssl_context
 from spiffetls import util
 
 if TYPE_CHECKING:
@@ -496,14 +495,15 @@ class SpiffeSSLContext:
 
     def __init__(
         self,
-        x509_source: X509Source,
+        x509_source: X509ContextSource,
         use_system_trusted_cas: bool = False,
         protocol: int = SSL.TLS_CLIENT_METHOD,
     ) -> None:
         """Initialize a SpiffeSSLContext.
 
         Args:
-            x509_source: The X509Source providing SPIFFE certificates.
+            x509_source: The source of coherent X.509 snapshots (an X509Source or a
+                compatible double exposing ``get_x509_context`` and subscriptions).
             use_system_trusted_cas: Whether to also trust system CA certificates.
             protocol: The SSL/TLS protocol method to use.
         """
@@ -520,6 +520,33 @@ class SpiffeSSLContext:
         self._minimum_version: int = ssl.TLSVersion.MINIMUM_SUPPORTED
         self._maximum_version: int = ssl.TLSVersion.MAXIMUM_SUPPORTED
         self._verify_flags: int = ssl.VERIFY_X509_TRUSTED_FIRST
+        # Settings that must survive a rotation (which rebuilds the inner context).
+        self._verify_mode: int = SSL.VERIFY_PEER | SSL.VERIFY_FAIL_IF_NO_PEER_CERT
+        self._ciphers: bytes | None = None
+        self._alpn_protocols: list[bytes] | None = None
+
+        if isinstance(self._ctx, RefreshingSSLContext):
+            self._ctx.add_reconfigure_hook(self._reconfigure_inner_context)
+
+    def _reconfigure_inner_context(self, ctx: SSL.Context) -> None:
+        """Re-applies wrapper-level settings to a freshly rebuilt inner context."""
+        self._apply_options_to(ctx)
+        ctx.set_verify(self._verify_mode, _verify_callback)
+        cert_store = ctx.get_cert_store()
+        if cert_store is not None:
+            cert_store.set_flags(self._verify_flags)
+        if self._ciphers is not None:
+            ctx.set_cipher_list(self._ciphers)
+        if self._alpn_protocols is not None:
+            ctx.set_alpn_protos(self._alpn_protocols)
+
+    def _apply_options_to(self, ctx: SSL.Context) -> None:
+        """Applies the configured options and TLS version bounds to one context."""
+        ctx.set_options(
+            self._options
+            | _openssl_to_ssl_minimum_version[self._minimum_version]
+            | _openssl_to_ssl_maximum_version[self._maximum_version]
+        )
 
     @property
     def __class__(self) -> type:
@@ -575,7 +602,8 @@ class SpiffeSSLContext:
         Args:
             value: The verification mode.
         """
-        self._ctx.set_verify(_stdlib_to_openssl_verify[value], _verify_callback)
+        self._verify_mode = _stdlib_to_openssl_verify[value]
+        self._ctx.set_verify(self._verify_mode, _verify_callback)
 
     def set_default_verify_paths(self) -> None:
         """Set default verification paths (no-op for SPIFFE contexts)."""
@@ -589,6 +617,7 @@ class SpiffeSSLContext:
         """
         if isinstance(ciphers, str):
             ciphers = ciphers.encode("utf-8")
+        self._ciphers = ciphers
         self._ctx.set_cipher_list(ciphers)
 
     def load_verify_locations(
@@ -628,6 +657,7 @@ class SpiffeSSLContext:
             protocols: List of ALPN protocol identifiers.
         """
         protocols_bytes = [util.to_bytes(p, "ascii") for p in protocols]
+        self._alpn_protocols = protocols_bytes
         return self._ctx.set_alpn_protos(protocols_bytes)
 
     def wrap_socket(
@@ -683,11 +713,7 @@ class SpiffeSSLContext:
 
     def _set_ctx_options(self) -> None:
         """Set OpenSSL context options based on minimum/maximum TLS versions."""
-        self._ctx.set_options(
-            self._options
-            | _openssl_to_ssl_minimum_version[self._minimum_version]
-            | _openssl_to_ssl_maximum_version[self._maximum_version]
-        )
+        self._apply_options_to(self._ctx)
 
     @property
     def minimum_version(self) -> int:

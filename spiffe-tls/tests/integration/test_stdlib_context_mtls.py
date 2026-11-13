@@ -91,7 +91,7 @@ def http_server_handler(server_socket: SSL.Connection, ready_event: threading.Ev
 def test_stdlib_context_successful_mtls_connection() -> None:
     """Test SpiffeSSLContext with urllib.request against a server requiring mTLS."""
     with X509Source(timeout_in_seconds=30) as x509_source:
-        spiffe_id = x509_source.svid.spiffe_id
+        spiffe_id = x509_source.get_x509_context().default_svid.spiffe_id
         options = ListenOptions(
             tls_mode=ServerTlsMode.MTLS,
             authorize_fn=spiffetls.tlsconfig.authorize.authorize_id(spiffe_id),
@@ -117,7 +117,7 @@ def test_stdlib_context_successful_mtls_connection() -> None:
 def test_stdlib_context_mtls_connection_fails_with_unauthorized_client() -> None:
     """Test SpiffeSSLContext rejects connections when client is not authorized."""
     with X509Source(timeout_in_seconds=30) as x509_source:
-        trust_domain = x509_source.svid.spiffe_id.trust_domain.as_spiffe_id()
+        trust_domain = x509_source.get_x509_context().default_svid.spiffe_id.trust_domain.as_spiffe_id()
 
         # Set the server to authorize only a specific SPIFFE ID that the client does not have
         server_options = ListenOptions(

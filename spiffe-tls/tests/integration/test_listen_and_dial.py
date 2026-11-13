@@ -65,7 +65,7 @@ def setup_server(
 
 def test_successful_mtls_connection_with_server_authorization() -> None:
     with X509Source(timeout_in_seconds=30) as x509_source:
-        spiffe_id = x509_source.svid.spiffe_id
+        spiffe_id = x509_source.get_x509_context().default_svid.spiffe_id
         options = ListenOptions(
             tls_mode=ServerTlsMode.MTLS,
             authorize_fn=spiffetls.tlsconfig.authorize.authorize_id(spiffe_id),
@@ -84,7 +84,7 @@ def test_successful_mtls_connection_with_server_authorization() -> None:
 
 def test_successful_tls_connection_with_client_authorization() -> None:
     with X509Source(timeout_in_seconds=30) as x509_source:
-        spiffe_id = x509_source.svid.spiffe_id
+        spiffe_id = x509_source.get_x509_context().default_svid.spiffe_id
         options = ListenOptions(tls_mode=ServerTlsMode.TLS)
 
         with setup_server(options) as (_, server_address, _):
@@ -104,7 +104,7 @@ def test_successful_tls_connection_with_client_authorization() -> None:
 
 def test_mtls_connection_fails_with_unauthorized_client() -> None:
     with X509Source(timeout_in_seconds=30) as x509_source:
-        trust_domain = x509_source.svid.spiffe_id.trust_domain.as_spiffe_id()
+        trust_domain = x509_source.get_x509_context().default_svid.spiffe_id.trust_domain.as_spiffe_id()
 
         # Set the server to authorize only a specific SPIFFE ID that the client does not have
         server_options = ListenOptions(
@@ -132,7 +132,7 @@ def test_mtls_connection_fails_with_unauthorized_client() -> None:
 
 def test_tls_connection_fails_due_to_client_certificate_verification_failure() -> None:
     with X509Source(timeout_in_seconds=30) as x509_source:
-        trust_domain = x509_source.svid.spiffe_id.trust_domain.as_spiffe_id()
+        trust_domain = x509_source.get_x509_context().default_svid.spiffe_id.trust_domain.as_spiffe_id()
         options = ListenOptions(tls_mode=ServerTlsMode.MTLS)
 
         with setup_server(options) as (_, server_address, _):

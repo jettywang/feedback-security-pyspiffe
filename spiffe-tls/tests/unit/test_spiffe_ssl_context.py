@@ -16,20 +16,21 @@ under the License.
 
 import ssl
 from typing import Tuple
-from unittest.mock import PropertyMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from OpenSSL import SSL
 from cryptography.hazmat.primitives import serialization
 
 from spiffe import X509Source, X509Svid, TrustDomain, X509Bundle, X509BundleSet
+from spiffe.workloadapi.x509_context import X509Context
 from spiffetls import SpiffeSSLContext
 from testutils.certs import TEST_BUNDLE_CERTS_DIR
 from testutils.certs import TEST_CERTS_DIR
 
 
 @pytest.fixture
-def source_mocks() -> Tuple[MagicMock, PropertyMock, PropertyMock]:
+def source_mocks() -> Tuple[MagicMock, X509Context]:
     """Create mock X509Source with test certificates."""
     der_type = serialization.Encoding.DER
     chain_path = TEST_CERTS_DIR / '1-chain.der'
@@ -45,15 +46,12 @@ def source_mocks() -> Tuple[MagicMock, PropertyMock, PropertyMock]:
         der_type,
     )
     x509_bundle_set = X509BundleSet.of([bundle_1, bundle_2])
+    x509_context = X509Context([x509_svid], x509_bundle_set)
 
     x509_source_mock = MagicMock(spec=X509Source)
-    mock_svid = PropertyMock(return_value=x509_svid)
-    mock_bundles = PropertyMock(return_value=x509_bundle_set.bundles)
+    x509_source_mock.get_x509_context.return_value = x509_context
 
-    type(x509_source_mock).svid = mock_svid
-    type(x509_source_mock).bundles = mock_bundles
-
-    return x509_source_mock, mock_svid, mock_bundles
+    return x509_source_mock, x509_context
 
 
 @pytest.mark.parametrize(
@@ -62,10 +60,10 @@ def source_mocks() -> Tuple[MagicMock, PropertyMock, PropertyMock]:
 )
 def test_spiffe_ssl_context_initialization(
     use_system_trust_store: bool,
-    source_mocks: Tuple[MagicMock, PropertyMock, PropertyMock],
+    source_mocks: Tuple[MagicMock, X509Context],
 ) -> None:
     """Test SpiffeSSLContext initialization."""
-    x509_source, mock_svid, mock_bundle = source_mocks
+    x509_source, _ = source_mocks
 
     ctx = SpiffeSSLContext(x509_source, use_system_trusted_cas=use_system_trust_store)
 
@@ -73,15 +71,17 @@ def test_spiffe_ssl_context_initialization(
     assert ctx.check_hostname is False
     assert ctx.minimum_version == ssl.TLSVersion.MINIMUM_SUPPORTED
     assert ctx.maximum_version == ssl.TLSVersion.MAXIMUM_SUPPORTED
-    assert mock_svid.call_count > 0, "Expected x509_source.svid to be accessed"
-    assert mock_bundle.call_count > 0, "Expected x509_source.bundles to be accessed"
+    # Configuration is taken from a single coherent X509Context snapshot.
+    x509_source.get_x509_context.assert_called_once()
+    x509_source.svid.assert_not_called()
+    x509_source.bundles.assert_not_called()
 
 
 def test_spiffe_ssl_context_class_property(
-    source_mocks: Tuple[MagicMock, PropertyMock, PropertyMock],
+    source_mocks: Tuple[MagicMock, X509Context],
 ) -> None:
     """Test that SpiffeSSLContext masquerades as ssl.SSLContext."""
-    x509_source, _, _ = source_mocks
+    x509_source, _ = source_mocks
 
     ctx = SpiffeSSLContext(x509_source)
 
@@ -90,10 +90,10 @@ def test_spiffe_ssl_context_class_property(
 
 
 def test_spiffe_ssl_context_options(
-    source_mocks: Tuple[MagicMock, PropertyMock, PropertyMock],
+    source_mocks: Tuple[MagicMock, X509Context],
 ) -> None:
     """Test setting and getting SSL options."""
-    x509_source, _, _ = source_mocks
+    x509_source, _ = source_mocks
 
     ctx = SpiffeSSLContext(x509_source)
 
@@ -106,10 +106,10 @@ def test_spiffe_ssl_context_options(
 
 
 def test_spiffe_ssl_context_verify_mode(
-    source_mocks: Tuple[MagicMock, PropertyMock, PropertyMock],
+    source_mocks: Tuple[MagicMock, X509Context],
 ) -> None:
     """Test setting and getting verification mode."""
-    x509_source, _, _ = source_mocks
+    x509_source, _ = source_mocks
 
     ctx = SpiffeSSLContext(x509_source)
 
@@ -122,10 +122,10 @@ def test_spiffe_ssl_context_verify_mode(
 
 
 def test_spiffe_ssl_context_tls_versions(
-    source_mocks: Tuple[MagicMock, PropertyMock, PropertyMock],
+    source_mocks: Tuple[MagicMock, X509Context],
 ) -> None:
     """Test setting minimum and maximum TLS versions."""
-    x509_source, _, _ = source_mocks
+    x509_source, _ = source_mocks
 
     ctx = SpiffeSSLContext(x509_source)
 
@@ -139,10 +139,10 @@ def test_spiffe_ssl_context_tls_versions(
 
 
 def test_spiffe_ssl_context_set_ciphers(
-    source_mocks: Tuple[MagicMock, PropertyMock, PropertyMock],
+    source_mocks: Tuple[MagicMock, X509Context],
 ) -> None:
     """Test setting cipher list."""
-    x509_source, _, _ = source_mocks
+    x509_source, _ = source_mocks
 
     ctx = SpiffeSSLContext(x509_source)
 
@@ -152,10 +152,10 @@ def test_spiffe_ssl_context_set_ciphers(
 
 
 def test_spiffe_ssl_context_no_op_methods(
-    source_mocks: Tuple[MagicMock, PropertyMock, PropertyMock],
+    source_mocks: Tuple[MagicMock, X509Context],
 ) -> None:
     """Test that no-op methods don't raise exceptions."""
-    x509_source, _, _ = source_mocks
+    x509_source, _ = source_mocks
 
     ctx = SpiffeSSLContext(x509_source)
 
@@ -168,10 +168,10 @@ def test_spiffe_ssl_context_no_op_methods(
 @patch('socket.socket')
 def test_spiffe_ssl_context_wrap_socket(
     mock_socket: MagicMock,
-    source_mocks: Tuple[MagicMock, PropertyMock, PropertyMock],
+    source_mocks: Tuple[MagicMock, X509Context],
 ) -> None:
     """Test wrapping a socket with SSL."""
-    x509_source, _, _ = source_mocks
+    x509_source, _ = source_mocks
 
     ctx = SpiffeSSLContext(x509_source)
 
@@ -201,10 +201,10 @@ def test_spiffe_ssl_context_wrap_socket(
 
 
 def test_spiffe_ssl_context_set_alpn_protocols(
-    source_mocks: Tuple[MagicMock, PropertyMock, PropertyMock],
+    source_mocks: Tuple[MagicMock, X509Context],
 ) -> None:
     """Test setting ALPN protocols."""
-    x509_source, _, _ = source_mocks
+    x509_source, _ = source_mocks
 
     ctx = SpiffeSSLContext(x509_source)
 
